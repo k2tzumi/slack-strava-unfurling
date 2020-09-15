@@ -5,11 +5,17 @@ import { SlackOAuth2Handler } from "./SlackOAuth2Handler";
 import { StravaOAuth2Handler } from "./StravaOAuth2Handler";
 import { Slack } from "./slack/types/index.d";
 import { SlackApiClient } from "./SlackApiClient";
-import { StravaApiClient, DetailedActivity } from "./StravaApiClient";
+import {
+  StravaApiClient,
+  DetailedActivity,
+  DetailedAthlete
+} from "./StravaApiClient";
+import { Polyline2GeoJson } from "./Polyline2GeoJson";
 
 type TextOutput = GoogleAppsScript.Content.TextOutput;
 type HtmlOutput = GoogleAppsScript.HTML.HtmlOutput;
 type LinkSharedEvent = Slack.CallbackEvent.LinkSharedEvent;
+type Blob = GoogleAppsScript.Base.Blob;
 
 const properties = PropertiesService.getScriptProperties();
 
@@ -171,15 +177,16 @@ function getActivityId(url: string): string | null {
 }
 
 function createStravaBlocks(detail: DetailedActivity): {} {
-  const { firstname, lastname } = stravaOAuth2Handler.token.athlete;
+  const client = new StravaApiClient(stravaOAuth2Handler.access_token);
+  const athlete: DetailedAthlete = client.getLoggedInAthlete();
 
-  return {
+  const blocks = {
     blocks: [
       {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: `<https://www.strava.com/activities/${detail.id}|${detail.name}> via @ <https://www.strava.com/athletes/${detail.athlete.id}|${firstname} ${lastname}>`
+          text: `<https://www.strava.com/activities/${detail.id}|${detail.name}> via @ <https://www.strava.com/athletes/${detail.athlete.id}|${athlete.firstname} ${athlete.lastname}>`
         },
         fields: [
           {
@@ -187,12 +194,12 @@ function createStravaBlocks(detail: DetailedActivity): {} {
             text: "*Type*"
           },
           {
-            type: "mrkdwn",
-            text: "*Distance*"
-          },
-          {
             type: "plain_text",
             text: detail.type
+          },
+          {
+            type: "mrkdwn",
+            text: "*Distance*"
           },
           {
             type: "plain_text",
@@ -203,12 +210,12 @@ function createStravaBlocks(detail: DetailedActivity): {} {
             text: "*Moving time*"
           },
           {
-            type: "mrkdwn",
-            text: "*Total elevation gain*"
-          },
-          {
             type: "plain_text",
             text: convertTimeUnit(detail.moving_time)
+          },
+          {
+            type: "mrkdwn",
+            text: "*Total elevation gain*"
           },
           {
             type: "plain_text",
@@ -217,12 +224,92 @@ function createStravaBlocks(detail: DetailedActivity): {} {
         ],
         accessory: {
           type: "image",
-          image_url: detail.photos.primary.urls["100"],
-          alt_text: "primary-photos"
+          image_url: athlete.profile_medium,
+          alt_text: "profile"
         }
+      },
+      {
+        type: "image",
+        image_url: createDonwloadMapImageUrl(
+          detail.id,
+          detail.map.summary_polyline,
+          detail.distance
+        ),
+        // image_url: createMapImageUrl(
+        //   detail.map.summary_polyline,
+        //   detail.distance
+        // ),
+        alt_text: "map"
       }
     ]
   };
+
+  if (detail.photos.primary) {
+    blocks.blocks.push({
+      type: "image",
+      image_url: detail.photos.primary.urls["600"],
+      alt_text: "primary-photos"
+    });
+  }
+
+  return blocks;
+}
+
+function createDonwloadMapImageUrl(
+  activityId: number,
+  summary_polyline: string,
+  distance: number
+): string {
+  const fileName = `strava-map-${activityId}.png`;
+  const fileIteraater = DriveApp.getFilesByName(fileName);
+
+  if (fileIteraater.hasNext()) {
+    const cache = fileIteraater.next();
+    cache.setSharing(
+      DriveApp.Access.ANYONE_WITH_LINK,
+      DriveApp.Permission.VIEW
+    );
+
+    return cache.getDownloadUrl();
+  } else {
+    const originUrl = createMapImageUrl(summary_polyline, distance);
+
+    try {
+      const blob = UrlFetchApp.fetch(originUrl).getBlob();
+
+      const file = DriveApp.createFile(blob);
+      file.setName(fileName);
+      file.setDescription(`origin: ${originUrl}`);
+      file.setSharing(
+        DriveApp.Access.ANYONE_WITH_LINK,
+        DriveApp.Permission.VIEW
+      );
+
+      return file.getDownloadUrl();
+    } catch (e) {
+      console.warn(`create map image faild. ${e.message}`);
+      return "https://placehold.jp/500x300.png?text=414%20URI%20Too%20Long";
+    }
+  }
+}
+
+const MAPBOX_ACCESS_TOKEN = properties.getProperty("MAPBOX_ACCESS_TOKEN");
+const MAPBOX_STYLE_ID =
+  properties.getProperty("MAPBOX_STYLE_ID") || "mapbox/streets-v11";
+
+function createMapImageUrl(summary_polyline: string, distance: number): string {
+  const url = `https://api.mapbox.com/styles/v1/${MAPBOX_STYLE_ID}/static/${getOverlayPath(
+    summary_polyline,
+    distance
+  )}/auto/500x300?access_token=${MAPBOX_ACCESS_TOKEN}`;
+
+  return url;
+}
+
+function getOverlayPath(summary_polyline: string, distance: number): string {
+  const geoJson = Polyline2GeoJson.convert(summary_polyline);
+
+  return `geojson(${encodeURI(Utilities.jsonStringify(geoJson))})`;
 }
 
 function convertTimeUnit(time: number): string {

@@ -18,7 +18,9 @@
     "https://slack.com/",
     "https://api.slack.com/",
     "https://hooks.slack.com/",
-    "https://www.strava.com/"
+    "https://www.strava.com/",
+    "https://maps.googleapis.com/",
+    "https://api.mapbox.com/"
   ],
   "runtimeVersion": "V8"
 }
