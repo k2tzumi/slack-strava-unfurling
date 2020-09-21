@@ -80,9 +80,12 @@ class StravaOAuth2Handler {
     private clientSecret: string,
     private propertyStore: Properties,
     private callbackFunctionName: string,
+    private user: string = null,
     private nextOAuthURL: string = null
   ) {
-    this.service = OAuth2.createService("Strava")
+    const serviceName = `Strava-${this.user}`;
+
+    this.service = OAuth2.createService(serviceName)
       .setAuthorizationBaseUrl("https://www.strava.com/oauth/authorize")
       .setTokenUrl("https://www.strava.com/oauth/token")
       .setTokenFormat(OAuth2.TOKEN_FORMAT.JSON)
@@ -121,6 +124,14 @@ class StravaOAuth2Handler {
 
   public verifyAccessToken(): boolean {
     return this.service.hasAccess();
+  }
+
+  public getRedirectUri(): string {
+    return this.service.getRedirectUri();
+  }
+
+  public setRedirectUri(redirectUri: string): void {
+    this.service.setRedirectUri(redirectUri);
   }
 
   private deauthorization(): void {

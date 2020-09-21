@@ -105,7 +105,7 @@ class SlackOAuth2Handler {
     return null;
   }
 
-  public static readonly SCOPE = "links:read,links:write";
+  public static readonly SCOPE = "links:read,links:write,chat:write";
 
   private service: Service_;
 
@@ -153,6 +153,14 @@ class SlackOAuth2Handler {
 
   public verifyAccessToken(): boolean {
     return this.service.hasAccess();
+  }
+
+  public getRedirectUri(): string {
+    return this.service.getRedirectUri();
+  }
+
+  public setRedirectUri(redirectUri: string): void {
+    this.service.setRedirectUri(redirectUri);
   }
 
   private tokenPayloadHandler = (tokenPayload: TokenPayload): TokenPayload => {

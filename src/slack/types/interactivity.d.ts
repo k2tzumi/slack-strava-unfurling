@@ -68,8 +68,8 @@ declare namespace Slack {
             response_url: string;
         }
         interface InteractionResponse {
-            replace_original?: string;
-            delete_original?: string;
+            replace_original?: boolean;
+            delete_original?: boolean;
             blocks?: {};
             text?: string;
             response_type?: string;

@@ -5,6 +5,7 @@ import { SlackOAuth2Handler } from "./SlackOAuth2Handler";
 import { StravaOAuth2Handler } from "./StravaOAuth2Handler";
 import { Slack } from "./slack/types/index.d";
 import { SlackApiClient } from "./SlackApiClient";
+import { SlackWebhooks } from "./SlackWebhooks";
 import {
   StravaApiClient,
   DetailedActivity,
@@ -15,7 +16,9 @@ import { Polyline2GeoJson } from "./Polyline2GeoJson";
 type TextOutput = GoogleAppsScript.Content.TextOutput;
 type HtmlOutput = GoogleAppsScript.HTML.HtmlOutput;
 type LinkSharedEvent = Slack.CallbackEvent.LinkSharedEvent;
-type Blob = GoogleAppsScript.Base.Blob;
+type BlockActions = Slack.Interactivity.BlockActions;
+type ButtonAction = Slack.Interactivity.ButtonAction;
+type InteractionResponse = Slack.Interactivity.InteractionResponse;
 
 const properties = PropertiesService.getScriptProperties();
 
@@ -28,44 +31,74 @@ const STRAVA_CLIENT_SECRET: string = properties.getProperty(
   "STRAVA_CLIENT_SECRET"
 );
 let slackOAuth2Handler: SlackOAuth2Handler;
-let stravaOAuth2Handler: StravaOAuth2Handler;
 
 const slackHandleCallback = (request): HtmlOutput => {
-  initializeOAuth2Handler();
-  return slackOAuth2Handler.authCallback(request);
+  return createSlackOAuth2Handler().authCallback(request);
 };
 
 const stravaHandleCallback = (request): HtmlOutput => {
-  initializeOAuth2Handler();
-  return stravaOAuth2Handler.authCallback(request);
+  const { serviceName, key } = request.parameter;
+  const user = serviceName.split("-")[1];
+  const channel = key.split("-")[0];
+  const message_ts = key.split("-")[1];
+  const stravaOAuth2Handler = createStravaOAuth2Handler(user);
+  // Authentication
+  const output = stravaOAuth2Handler.authCallback(request);
+
+  // Retrieving Unauthenticated Event Information from the Cache.
+  const cache = CacheService.getScriptCache();
+  const formValue = JSON.parse(cache.get(key));
+
+  if (formValue) {
+    // Unfurls now that we've been authenticated.
+    doUnfurls(channel, user, message_ts, formValue.url);
+
+    // delete ephemeral message
+    const webhook = new SlackWebhooks(formValue.response_url);
+    webhook.invoke({ delete_original: true });
+  }
+
+  return output;
 };
 
-function initializeOAuth2Handler(): void {
-  slackOAuth2Handler = new SlackOAuth2Handler(
-    SLACK_CLIENT_ID,
-    SLACK_CLIENT_SECRET,
-    PropertiesService.getUserProperties(),
-    slackHandleCallback.name
-  );
-  stravaOAuth2Handler = new StravaOAuth2Handler(
+function createSlackApiClient(): SlackApiClient {
+  return new SlackApiClient(createSlackOAuth2Handler().access_token);
+}
+
+function createStravaOAuth2Handler(user: string): StravaOAuth2Handler {
+  return new StravaOAuth2Handler(
     STRAVA_CLIENT_ID,
     STRAVA_CLIENT_SECRET,
     PropertiesService.getUserProperties(),
     stravaHandleCallback.name,
-    slackOAuth2Handler.authorizationUrl
+    user
   );
+}
+
+function createSlackOAuth2Handler(): SlackOAuth2Handler {
+  if (!slackOAuth2Handler) {
+    slackOAuth2Handler = new SlackOAuth2Handler(
+      SLACK_CLIENT_ID,
+      SLACK_CLIENT_SECRET,
+      PropertiesService.getUserProperties(),
+      slackHandleCallback.name
+    );
+  }
+
+  return slackOAuth2Handler;
 }
 
 /**
  * Authorizes and makes a request to the Slack API.
  */
 function doGet(request): HtmlOutput {
-  initializeOAuth2Handler();
+  const handler = createSlackOAuth2Handler();
 
   // Clear authentication by accessing with the get parameter `?logout=true`
   if (request.parameter.logout) {
-    slackOAuth2Handler.clearService();
-    stravaOAuth2Handler.clearService();
+    const userProperties = PropertiesService.getUserProperties();
+    handler.clearService();
+    userProperties.deleteAllProperties();
     const template = HtmlService.createTemplate(
       'Logout<br /><a href="<?= requestUrl ?>" target="_blank">refresh</a>.'
     );
@@ -73,20 +106,12 @@ function doGet(request): HtmlOutput {
     return HtmlService.createHtmlOutput(template.evaluate());
   }
 
-  if (!stravaOAuth2Handler.verifyAccessToken()) {
-    const template = HtmlService.createTemplate(
-      'RedirectUri:<?= redirectUrl ?> <br /><a href="<?= authorizationUrl ?>" target="_blank">Authorize Strava</a>.'
-    );
-    template.authorizationUrl = stravaOAuth2Handler.authorizationUrl;
-    template.redirectUrl = stravaOAuth2Handler.redirectUri;
-    return HtmlService.createHtmlOutput(template.evaluate());
-  }
-  if (!slackOAuth2Handler.verifyAccessToken()) {
+  if (!handler.verifyAccessToken()) {
     const template = HtmlService.createTemplate(
       'RedirectUri:<?= redirectUrl ?> <br /><a href="<?= authorizationUrl ?>" target="_blank">Authorize Slack</a>.'
     );
-    template.authorizationUrl = slackOAuth2Handler.authorizationUrl;
-    template.redirectUrl = slackOAuth2Handler.redirectUri;
+    template.authorizationUrl = handler.authorizationUrl;
+    template.redirectUrl = handler.redirectUri;
     return HtmlService.createHtmlOutput(template.evaluate());
   }
 
@@ -106,6 +131,7 @@ function doPost(e): TextOutput {
   const slackHandler = new SlackHandler(VERIFICATION_TOKEN);
 
   slackHandler.addCallbackEventListener("link_shared", executeLinkSharedEvent);
+  slackHandler.addInteractivityListener("button", executeButton);
 
   try {
     const process = slackHandler.handle(e);
@@ -129,38 +155,218 @@ function doPost(e): TextOutput {
 }
 
 const executeLinkSharedEvent = (event: LinkSharedEvent): void => {
-  event.links.forEach(link => {
-    new JobBroker().enqueue(chatUnfurl, {
-      channel: event.channel,
-      message_ts: event.message_ts,
-      url: link.url
+  const stravaOAuth2Handler = createStravaOAuth2Handler(event.user);
+
+  if (!stravaOAuth2Handler.verifyAccessToken()) {
+    postAuthenticationMessage(
+      event.channel,
+      event.user,
+      event.message_ts,
+      event.links[0].url
+    );
+
+    return;
+  }
+
+  if (event.links.length === 1) {
+    doUnfurls(event.channel, event.user, event.message_ts, event.links[0].url);
+  } else {
+    event.links.forEach(link => {
+      new JobBroker().enqueue(chatUnfurl, {
+        channel: event.channel,
+        user: event.user,
+        message_ts: event.message_ts,
+        url: link.url
+      });
     });
-  });
+  }
+};
+
+function postAuthenticationMessage(
+  channel: string,
+  user: string,
+  message_ts: string,
+  url: string
+): void {
+  const stravaOAuth2Handler = createStravaOAuth2Handler(user);
+  const client = createSlackApiClient();
+  const redirectUri = stravaOAuth2Handler.getRedirectUri();
+  const cacheKey = `${channel}-${message_ts}`;
+
+  stravaOAuth2Handler.setRedirectUri(
+    `${redirectUri}?key=${encodeURI(cacheKey)}`
+  );
+
+  client.postEphemeral(
+    channel,
+    "",
+    user,
+    createAuthenticationBlocks(stravaOAuth2Handler, message_ts, url)
+  );
+}
+
+function createAuthenticationBlocks(
+  stravaOAuth2Handler: StravaOAuth2Handler,
+  message_ts: string,
+  url: string
+): {}[] {
+  const formValue = {
+    message_ts,
+    url
+  };
+
+  let message;
+  if (stravaOAuth2Handler.verifyAccessToken()) {
+    message =
+      "Your credentials appear to be incorrect. Would you like to re-authenticate?";
+  } else {
+    message =
+      "That looks like a Strava link. Would you like to unfurling Strava's URL";
+  }
+
+  return [
+    {
+      type: "context",
+      elements: [
+        {
+          type: "mrkdwn",
+          text: message
+        }
+      ]
+    },
+    {
+      type: "actions",
+      elements: [
+        {
+          type: "button",
+          text: {
+            type: "plain_text",
+            text: "Yes, please"
+          },
+          value: JSON.stringify(formValue),
+          url: stravaOAuth2Handler.authorizationUrl,
+          style: "primary",
+          action_id: "auth"
+        },
+        {
+          type: "button",
+          text: {
+            type: "plain_text",
+            text: "No, thanks"
+          },
+          value: '{ "no": true }',
+          action_id: "no"
+        }
+      ]
+    }
+  ];
+}
+
+const executeButton = (blockActions: BlockActions): {} => {
+  const action = blockActions.actions[0] as ButtonAction;
+  const response_url = blockActions.response_url;
+
+  switch (action.action_id) {
+    case "auth":
+      // Deleting Previous Credentials.
+      const user = blockActions.user.id;
+      createStravaOAuth2Handler(user).clearService();
+
+      // Store cache for post-authentication
+      const formValue = JSON.parse(action.value);
+      const channel = blockActions.channel.id;
+      const cache = CacheService.getScriptCache();
+      const cacheKey = `${channel}-${formValue.message_ts}`;
+      const cacheValue = { ...formValue, user, channel, response_url };
+
+      cache.put(cacheKey, JSON.stringify(cacheValue));
+
+      return {};
+  }
+
+  const webhook = new SlackWebhooks(response_url);
+  const response: InteractionResponse = { delete_original: true };
+
+  if (!webhook.invoke(response)) {
+    throw new Error(
+      `executeButton faild. event: ${JSON.stringify(blockActions)}`
+    );
+  }
+
+  return {};
 };
 
 const chatUnfurl = (): void => {
-  initializeOAuth2Handler();
-  const client = new SlackApiClient(slackOAuth2Handler.access_token);
+  const client = createSlackApiClient();
 
   const jobBroker: JobBroker = new JobBroker();
   jobBroker.consumeJob(
-    (parameter: { channel: string; message_ts: string; url: string }) => {
-      client.chatUnfurl(
-        parameter.channel,
-        parameter.message_ts,
-        createUnfurls(parameter.url)
-      );
+    (parameter: {
+      channel: string;
+      user: string;
+      message_ts: string;
+      url: string;
+    }) => {
+      const stravaApiClient = createStravaApiClient(parameter.user);
+      const unfurls = createUnfurls(stravaApiClient, parameter.url);
+
+      // Resource Not Found
+      if (Object.keys(unfurls).length === 0) {
+        console.info(`chatUnfurl - Resource Not Found.`);
+
+        postAuthenticationMessage(
+          parameter.channel,
+          parameter.user,
+          parameter.message_ts,
+          parameter.url
+        );
+
+        return;
+      }
+
+      client.chatUnfurl(parameter.channel, parameter.message_ts, unfurls);
     }
   );
 };
 
-function createUnfurls(url: string): {} {
+function doUnfurls(
+  channel: string,
+  user: string,
+  message_ts: string,
+  url: string
+): void {
+  const client = createSlackApiClient();
+
+  const stravaApiClient = createStravaApiClient(user);
+  const unfurls = createUnfurls(stravaApiClient, url);
+
+  // Resource Not Found
+  if (Object.keys(unfurls).length === 0) {
+    console.info(`chatUnfurl - Resource Not Found.`);
+
+    postAuthenticationMessage(channel, user, message_ts, url);
+
+    return;
+  }
+
+  client.chatUnfurl(channel, message_ts, unfurls);
+}
+
+function createStravaApiClient(user: string): StravaApiClient {
+  const stravaOAuth2Handler = createStravaOAuth2Handler(user);
+
+  return new StravaApiClient(stravaOAuth2Handler.access_token);
+}
+
+function createUnfurls(stravaApiClient: StravaApiClient, url: string): {} {
   const unfurls = {};
-  const client = new StravaApiClient(stravaOAuth2Handler.access_token);
   const activityId = getActivityId(url);
 
   if (activityId) {
-    unfurls[url] = createStravaBlocks(client.getActivityById(activityId));
+    const activity = stravaApiClient.getActivityById(activityId);
+    if (activity) {
+      unfurls[url] = createStravaBlocks(stravaApiClient, activity);
+    }
   }
 
   return unfurls;
@@ -176,9 +382,18 @@ function getActivityId(url: string): string | null {
   }
 }
 
-function createStravaBlocks(detail: DetailedActivity): {} {
-  const client = new StravaApiClient(stravaOAuth2Handler.access_token);
-  const athlete: DetailedAthlete = client.getLoggedInAthlete();
+function createStravaBlocks(
+  stravaApiClient: StravaApiClient,
+  detail: DetailedActivity
+): {} {
+  const athlete: DetailedAthlete = stravaApiClient.getLoggedInAthlete();
+
+  let athleteName;
+  if (detail.athlete.id === athlete.id) {
+    athleteName = `${athlete.firstname} ${athlete.lastname}`;
+  } else {
+    athleteName = detail.athlete.id;
+  }
 
   const blocks = {
     blocks: [
@@ -186,7 +401,7 @@ function createStravaBlocks(detail: DetailedActivity): {} {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: `<https://www.strava.com/activities/${detail.id}|${detail.name}> via @ <https://www.strava.com/athletes/${detail.athlete.id}|${athlete.firstname} ${athlete.lastname}>`
+          text: `<https://www.strava.com/activities/${detail.id}|${detail.name}> via @ <https://www.strava.com/athletes/${detail.athlete.id}|${athleteName}>`
         },
         fields: [
           {
@@ -332,9 +547,4 @@ function convertDistanceUnit(distance: number): string {
   }
 }
 
-export {
-  initializeOAuth2Handler,
-  executeLinkSharedEvent,
-  createUnfurls,
-  getActivityId
-};
+export { executeLinkSharedEvent, createUnfurls, getActivityId };

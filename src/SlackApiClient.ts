@@ -35,6 +35,10 @@ interface ChatPostMessageResponse extends Response {
   message: Message;
 }
 
+interface ChatPostEphemeralResponse extends Response {
+  message_ts: string;
+}
+
 interface ConversationsHistoryResponse extends Response {
   messages: Message[];
   has_more: boolean;
@@ -131,15 +135,27 @@ class SlackApiClient {
     return true;
   }
 
-  public postEphemeral(channel: string, text: string, user: string): void {
+  public postEphemeral(
+    channel: string,
+    text: string,
+    user: string,
+    blocks: (Block | {})[] = null
+  ): string {
     const endPoint = SlackApiClient.BASE_PATH + "chat.postEphemeral";
-    const payload: {} = {
+    let payload: {} = {
       channel,
       text,
       user
     };
 
-    const response: Response = this.invokeAPI(endPoint, payload);
+    if (blocks) {
+      payload = { ...payload, blocks };
+    }
+
+    const response = this.invokeAPI(
+      endPoint,
+      payload
+    ) as ChatPostEphemeralResponse;
 
     if (!response.ok) {
       throw new Error(
@@ -148,6 +164,8 @@ class SlackApiClient {
         )}, payload: ${JSON.stringify(payload)}`
       );
     }
+
+    return response.message_ts;
   }
 
   public chatPostMessage(
@@ -328,6 +346,24 @@ class SlackApiClient {
     if (!response.ok) {
       throw new Error(
         `chat unfurls faild. response: ${JSON.stringify(
+          response
+        )}, payload: ${JSON.stringify(payload)}`
+      );
+    }
+  }
+
+  public chatDlete(channel: string, ts: string): void {
+    const endPoint = SlackApiClient.BASE_PATH + "chat.delete";
+    const payload: {} = {
+      channel,
+      ts
+    };
+
+    const response: Response = this.invokeAPI(endPoint, payload);
+
+    if (!response.ok) {
+      throw new Error(
+        `chat delete faild. response: ${JSON.stringify(
           response
         )}, payload: ${JSON.stringify(payload)}`
       );

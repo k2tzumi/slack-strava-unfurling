@@ -271,7 +271,7 @@ class StravaApiClient {
   public getActivityById(
     id: string,
     include_all_efforts: boolean = false
-  ): DetailedActivity {
+  ): DetailedActivity | null {
     const endPoint =
       StravaApiClient.BASE_URI +
       `/activities/${id}?include_all_efforts=${include_all_efforts}`;
@@ -280,6 +280,10 @@ class StravaApiClient {
     const response = this.invokeAPI(endPoint, payload) as DetailedActivity;
 
     if (response.errors) {
+      if (response.message === "Resource Not Found") {
+        return null;
+      }
+
       throw new Error(
         `getActivityById faild. response: ${JSON.stringify(
           response
@@ -395,6 +399,7 @@ class StravaApiClient {
 
     switch (response.getResponseCode()) {
       case 200:
+      case 404:
         return JSON.parse(response.getContentText());
       default:
         console.warn(

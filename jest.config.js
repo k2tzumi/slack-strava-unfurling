@@ -10,6 +10,8 @@ module.exports = {
         CacheService: {},
         ContentService: {},
         ScriptApp: {},
+        DriveApp: {},
+        Utilities: {},
     },
     moduleDirectories: [
         'node_modules',
